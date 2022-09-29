@@ -6,9 +6,11 @@
 #include <cstring>
 using namespace std;
 
+#define uint uint32_t
+
 // nodes are stored as E*, which is an array of values such that *(p + i) is the min value of the ith subtree, *((E**)p - i - 1) is the ith subtree, and *(uint*)(p + (1 << factor)) is the amount of real values
 
-constexpr uint k = 2; // 2^k is the block size
+constexpr uint k = 8; // 2^k is the block size
 constexpr uint d = 1; // nodes have a branching factor of 2^(d + k*2^h), where h is the node height. The default value is 1.
 constexpr uint e = (3 << k) >> 2; // the minimum sum of real sizes for neighboring blocks
 
@@ -22,6 +24,17 @@ template<class E> struct T {
 		x = i;
 	}
 };
+template<class E> void destruct(E* node, uint height) {
+	if (height == 0) {
+		free(node);
+		return;
+	}
+	uint l = *(uint*)(node + (1 << ((k << (height - 1)) + d)));
+	for (uint x = 1; x <= l; x++) {
+		destruct(*((E**)node - x), height - 1);
+	}
+	free((E**)node - (1 << ((k << (height - 1)) + d)));
+}
 
 template<class E> class GTree {
 public:
@@ -29,24 +42,47 @@ public:
 	uint length; // number of total elements in the tree
 	uint curfactor; // 2^curfactor is the current physical size of the root
 	uint levels; // the number of levels
-	E min; // the minimum value in the tree
+	E* firstleaf;
+	T<E>* path;
 	GTree() {
 		start = (E*)((char*)malloc((sizeof(E) + sizeof(E*) + 2) << 1) + (sizeof(E*) << 1));
 		*(uint*)(start + 2) = 1;
-		*((E**)start - 1) = (E*)malloc((sizeof(E) << k) + 4);
-		*(uint*)(*((E**)start - 1) + (1 << k)) = 0;
+		firstleaf = (E*)malloc((sizeof(E) << k) + 4);
+		*(uint*)(firstleaf + (1 << k)) = 1;
+		*((E**)start - 1) = firstleaf;
 		length = 0;
 		curfactor = 1;
 		levels = 1;
+		path = (T<E>*)malloc(sizeof(T<E>));
 	}
-	bool remove(E remove) {
-		if (length == 0 || remove < min) {
-			return false;
+	~GTree() {
+		uint l = *(uint*)(start + (1 << curfactor));
+		for (uint x = 1; x <= l; x++) {
+			destruct(*((E**)start - x), levels - 1);
 		}
+		free((E**)start - (1 << curfactor));
+		free(path);
+	}
+    uint size() {
+        return length;
+    }
+    E min() {
+        return *firstleaf;
+    }
+    E max() {
+        E* cur = *((E**)start - *(uint*)(start + (1 << curfactor)));
+        if (levels > 1) {
+            for (uint factor = (k << (levels - 2)) + d; factor >= k + d; factor = (factor + d) >> 1) {
+                cur = *((E**)cur - *(uint*)(cur + (1 << factor)));
+            }
+        }
+        return *(cur + *(uint*)(cur + (1 << k)) - 1);
+    }
+	bool remove(E remove) {
 		// same algorithm as contains, just also stores the path in an array
 		const int levels = this->levels;
 		int level = levels;
-		T<E>* path = (T<E>*)malloc(sizeof(T<E>) * levels);
+		T<E>* path = this->path;
 		uint factor = (k << (levels - 1)) + d;
 		E* cur = start;
 		uint x = 1 << (curfactor - 1);
@@ -111,8 +147,7 @@ public:
 			x = (x >= l || remove < *(cur + x) ? x - (1 << 0) : x + (1 << 0));
 		}
 		x = (x >= l || remove < *(cur + x) ? x - 1 : x);
-		if (x >= l || remove > *(cur + x)) { // if the value isn't in the tree
-			delete path;
+		if (x >= l || (x == 0 && cur == firstleaf) || remove > *(cur + x)) { // if the value isn't in the tree
 			return false;
 		}
 		length--;
@@ -133,14 +168,11 @@ public:
 				y = (path + level)->x;
 				*((path + level)->start + y) = p;
 			}
-			if (y == 0 && level == levels) {
-				min = p;
-			}
 		} // to here just resets min values that need resetting because the old one got deleted
 		l = *(uint*)(cur + (1 << k)); // the real length of the leaf containing the element
 		y = path->x; // index of the block containing the element in the node with height 0
 		if (l == 1) { // if the block will be empty after the deletion, it should just be removed
-			delete cur;
+			free(cur);
 			goto done;
 		}
 		if (y != 0) { //checking if the block should be merged with the block before it
@@ -150,7 +182,7 @@ public:
 				*(uint*)(other + (1 << k)) = l + ol - 1;
 				memcpy(other + ol, cur, sizeof(E) * x);
 				memcpy(other + (ol + x), cur + (x + 1), sizeof(E) * (l - (x + 1)));
-				delete cur;
+				free(cur);
 				goto done;
 			}
 		}
@@ -161,7 +193,7 @@ public:
 				*(uint*)(cur + (1 << k)) = l + ol - 1;
 				memmove(cur + x, cur + x + 1, sizeof(E) * (l - (x + 1)));
 				memcpy(cur + (l - 1), other, sizeof(E) * ol);
-				delete other;
+				free(other);
 				path->x++; // makes it so that other will be deleted in the 1st level node's array instead of cur
 				goto done;
 			}
@@ -169,7 +201,6 @@ public:
 		//this is for if the blocks don't merge
 		--*(uint*)(cur + (1 << k));
 		memmove(cur + x, cur + (x + 1), sizeof(E) * (l - (x + 1)));
-		delete path;
 		return true;
 		// this is for if 2 blocks did merge
 		done:
@@ -181,7 +212,7 @@ public:
 			p = (E**)((path + (level + 1))->start) - 1;
 			l = *(uint*)(cur + (1 << factor)); //the node to be removed's parent's real size
 			if (l == 1) { //if the node to be removed's parent would be empty after removing the node, the parent should be deleted
-				delete ((E**)cur - (1 << (factor)));
+				free(((E**)cur - (1 << (factor))));
 				continue;
 			}
 			if (y != 0) { //checking if the node's parent should be merged with the node behind it
@@ -193,7 +224,7 @@ public:
 					memcpy((E**)other - (ol + x), (E**)cur - x, sizeof(E*) * x);
 					memcpy(other + ol, cur, sizeof(E) * x);
 					memcpy(other + (ol + x), cur + (x + 1), sizeof(E) * (l - (x + 1)));
-					delete ((E**)cur - (1 << factor));
+					free(((E**)cur - (1 << factor)));
 					continue;
 				}
 			}
@@ -206,7 +237,7 @@ public:
 					memcpy((E**)cur - (l + ol - 1), (E**)other - ol, sizeof(E*) * ol);
 					memmove(cur + x, cur + (x + 1), sizeof(E) * (l - (x + 1)));
 					memcpy(cur + (l - 1), other, sizeof(E) * ol);
-					delete ((E**)other - (1 << factor));
+					free(((E**)other - (1 << factor)));
 					(path + level + 1)->x++; //marking it so that other will be deleted rather than cur
 					continue;
 				}
@@ -215,7 +246,6 @@ public:
 			--*(uint*)(cur + (1 << factor));
 			memmove((E**)cur - (l - 1), (E**)cur - l, sizeof(E*) * (l - x - 1));
 			memmove(cur + x, cur + x + 1, sizeof(E) * (l - x - 1));
-			delete path;
 			return true;
 		}
 		//this is when the node to be deleted's parent is the root
@@ -227,7 +257,6 @@ public:
 				--*(uint*)(cur + (1 << curfactor));
 				memmove((E**)cur - (l - 1), (E**)cur - l, sizeof(E*) * (l - x - 1));
 				memmove(cur + x, cur + x + 1, sizeof(E) * (l - x - 1));
-				delete path;
 				return true;
 			}
 			//this is for when the root's array needs resizing to half its previous size
@@ -237,9 +266,8 @@ public:
 			memcpy((E**)start - (l - 1), (E**)cur - l, sizeof(E*) * (l - (x - 1)));
 			memcpy((E**)start - x, (E**)cur - x, (sizeof(E) + sizeof(E*)) * x);
 			memcpy(start + x, cur + (x + 1), sizeof(E) * (l - (x - 1)));
-			delete ((E**)cur - (2 << curfactor));
+			free(((E**)cur - (2 << curfactor)));
 			if (curfactor > 1) { //if the root's maximum size is less than 2, the root should be deleted, and this is checking that
-				delete path;
 				return true;
 			}
 			cur = start;
@@ -253,89 +281,64 @@ public:
 				start = *((E**)cur - 1);
 			}
 			curfactor = (k << (--(this->levels) - 1)) + d;
-			delete ((E**)cur - 2);
-			delete path;
+			free(((E**)cur - 2));
+			free(path);
+			this->path = (T<E>*)malloc(this->levels * sizeof(T<E>));
 			return true;
 		}
-		if (l > 1) { //if there will still be elements in the tree after the deletion
-			if (x == 0) {
-				*cur = *(cur + 1);
-				*((E**)cur - 1) = *((E**)cur - 2);
-			}
-			*(uint*)(cur + 2) = 1;
-			delete path;
-			return true;
+		if (x == 0) {
+			*cur = *(cur + 1);
+			*((E**)cur - 1) = *((E**)cur - 2);
 		}
-		//if the tree will be empty, which should reset the tree to how it was after construction
-		*((E**)start - 1) = (E*)malloc((sizeof(E) << k) + 4);
-		*(uint*)(*((E**)start - 1) + (1 << k)) = 0;
-		delete path;
+		*(uint*)(cur + 2) = 1;
 		return true;
 	}
 	bool insert(E insert) {
 		const uint levels = this->levels;
 		uint level = levels;
-		T<E>* path = (T<E>*)malloc(sizeof(T<E>) * levels);
+		T<E>* path = this->path;
 		uint factor = (k << ((levels - 1))) + d;
 		E* cur = start;
 		uint x = 1 << (curfactor - 1);
 		uint l = *(uint*)(cur + (x << 1));
-		if (length == 0 || insert < min) { //if and only of the inserted value is smaller than the min, min values in arrays need updating
-			for (;level;) {
-				*cur = insert;
-				*(path + --level) = T<E>(cur, 0);
-				cur = *((E**)cur - 1);
+		for (;factor >= k + d; factor = (factor + d) >> 1, x = 1 << (factor - 1), l = *(uint*)(cur + (1 << factor))) {
+			switch (x) {
+			case 1 << 16:
+				x = (x >= l || insert < *(cur + x) ? x - (1 << 15) : x + (1 << 15));
+			case 1 << 15:
+				x = (x >= l || insert < *(cur + x) ? x - (1 << 14) : x + (1 << 14));
+			case 1 << 14:
+				x = (x >= l || insert < *(cur + x) ? x - (1 << 13) : x + (1 << 13));
+			case 1 << 13:
+				x = (x >= l || insert < *(cur + x) ? x - (1 << 12) : x + (1 << 12));
+			case 1 << 12:
+				x = (x >= l || insert < *(cur + x) ? x - (1 << 11) : x + (1 << 11));
+			case 1 << 11:
+				x = (x >= l || insert < *(cur + x) ? x - (1 << 10) : x + (1 << 10));
+			case 1 << 10:
+				x = (x >= l || insert < *(cur + x) ? x - (1 << 9) : x + (1 << 9));
+			case 1 << 9:
+				x = (x >= l || insert < *(cur + x) ? x - (1 << 8) : x + (1 << 8));
+			case 1 << 8:
+				x = (x >= l || insert < *(cur + x) ? x - (1 << 7) : x + (1 << 7));
+			case 1 << 7:
+				x = (x >= l || insert < *(cur + x) ? x - (1 << 6) : x + (1 << 6));
+			case 1 << 6:
+				x = (x >= l || insert < *(cur + x) ? x - (1 << 5) : x + (1 << 5));
+			case 1 << 5:
+				x = (x >= l || insert < *(cur + x) ? x - (1 << 4) : x + (1 << 4));
+			case 1 << 4:
+				x = (x >= l || insert < *(cur + x) ? x - (1 << 3) : x + (1 << 3));
+			case 1 << 3:
+				x = (x >= l || insert < *(cur + x) ? x - (1 << 2) : x + (1 << 2));
+			case 1 << 2:
+				x = (x >= l || insert < *(cur + x) ? x - (1 << 1) : x + (1 << 1));
+			case 1 << 1:
+				x = (x >= l || insert < *(cur + x) ? x - (1 << 0) : x + (1 << 0));
 			}
-			*cur = insert;
-			insert = min;
-			min = *cur;
-			if (length == 0) {
-				delete path;
-				length++;
-				++*(uint*)(cur + (1 << k));
-				return true;
-			}
-		}
-		else { //same algorithm as contains
-			for (;factor >= k + d; factor = (factor + d) >> 1, x = 1 << (factor - 1), l = *(uint*)(cur + (1 << factor))) {
-				switch (x) {
-				case 1 << 16:
-					x = (x >= l || insert < *(cur + x) ? x - (1 << 15) : x + (1 << 15));
-				case 1 << 15:
-					x = (x >= l || insert < *(cur + x) ? x - (1 << 14) : x + (1 << 14));
-				case 1 << 14:
-					x = (x >= l || insert < *(cur + x) ? x - (1 << 13) : x + (1 << 13));
-				case 1 << 13:
-					x = (x >= l || insert < *(cur + x) ? x - (1 << 12) : x + (1 << 12));
-				case 1 << 12:
-					x = (x >= l || insert < *(cur + x) ? x - (1 << 11) : x + (1 << 11));
-				case 1 << 11:
-					x = (x >= l || insert < *(cur + x) ? x - (1 << 10) : x + (1 << 10));
-				case 1 << 10:
-					x = (x >= l || insert < *(cur + x) ? x - (1 << 9) : x + (1 << 9));
-				case 1 << 9:
-					x = (x >= l || insert < *(cur + x) ? x - (1 << 8) : x + (1 << 8));
-				case 1 << 8:
-					x = (x >= l || insert < *(cur + x) ? x - (1 << 7) : x + (1 << 7));
-				case 1 << 7:
-					x = (x >= l || insert < *(cur + x) ? x - (1 << 6) : x + (1 << 6));
-				case 1 << 6:
-					x = (x >= l || insert < *(cur + x) ? x - (1 << 5) : x + (1 << 5));
-				case 1 << 5:
-					x = (x >= l || insert < *(cur + x) ? x - (1 << 4) : x + (1 << 4));
-				case 1 << 4:
-					x = (x >= l || insert < *(cur + x) ? x - (1 << 3) : x + (1 << 3));
-				case 1 << 3:
-					x = (x >= l || insert < *(cur + x) ? x - (1 << 2) : x + (1 << 2));
-				case 1 << 2:
-					x = (x >= l || insert < *(cur + x) ? x - (1 << 1) : x + (1 << 1));
-				case 1 << 1:
-					x = (x >= l || insert < *(cur + x) ? x - (1 << 0) : x + (1 << 0));
-				}
-				x = (x >= l || insert < *(cur + x) ? x - 1 : x);
-				*(path + --level) = T<E>(cur, x);
-				cur = *((E**)cur - (x + 1));
-			}
+			x = (x >= l || insert < *(cur + x) ? x - 1 : x);
+			*(path + --level) = T<E>(cur, x);
+			cur = *((E**)cur - (x + 1));
 		}
 		l = *(uint*)(cur + (1 << k));
 		x = 1 << (k - 1);
@@ -358,8 +361,7 @@ public:
 			x = (x >= l || insert < *(cur + x) ? x - (1 << 0) : x + (1 << 0));
 		}
 		x = (x >= l || insert < *(cur + x) ? x - 1 : x);
-		if (x < l && !(insert > *(cur + x))) { //if the value is already in the tree
-			delete path;
+		if (x < l && (x != 0 || cur != firstleaf) && !(insert > *(cur + x))) { //if the value is already in the tree
 			return false;
 		}
 		length++;
@@ -368,7 +370,6 @@ public:
 			++*(uint*)(cur + (1 << k));
 			memmove(cur + x + 1, cur + x, sizeof(E) * (l - x));
 			*(cur + x) = insert;
-			delete path;
 			return true;
 		}
 		E* next = (E*)malloc((sizeof(E) << k) + 4); //makes the 2nd block the 2nd half of cur splits into
@@ -399,7 +400,6 @@ public:
 				*((E**)cur - (x + 1)) = next;
 				memmove(cur + x + 1, cur + x, sizeof(E) * (l - x));
 				*(cur + x) = *next;
-				delete path;
 				return true;
 			}
 			// if cur is full
@@ -438,7 +438,6 @@ public:
 			*((E**)cur - (x + 1)) = next;
 			memmove(cur + x + 1, cur + x, sizeof(E) * (l - x));
 			*(cur + x) = *next;
-			delete path;
 			return true;
 		}
 		if (curfactor != (k << ((levels - 1))) + d) { //if the root is full, but it's current branching factor isn't the maximum branching factor it can have, it should double in size
@@ -450,8 +449,7 @@ public:
 			memcpy((E**)next - x, (E**)cur - x, (sizeof(E*) + sizeof(E)) * x);
 			*(next + x) = *old;
 			memcpy(next + (x + 1), cur + x, sizeof(E) * (l - x));
-			delete path;
-			delete ((E**)start - (1 << (curfactor - 1)));
+			free(((E**)start - (1 << (curfactor - 1))));
 			start = next;
 			*(uint*)(start + (1 << curfactor)) = (1 << (curfactor - 1)) + 1;
 			return true;
@@ -490,13 +488,11 @@ public:
 		start = cur;
 		curfactor = 1;
 		this->levels++;
-		delete path;
+		free(path);
+		this->path = (T<E>*)malloc(this->levels * sizeof(T<E>));
 		return true;
 	}
-	bool const contains(E search) {
-		if (length == 0 || search < min) { //the binary search won't work if search < min, but is much faster than a traditional binary search, so this
-			return 0;
-		}
+	E const contains(E search) {
 		uint factor = (k << ((levels - 1))) + d; //2^factor is the current nodes branching factor
 		E* cur = start; //the current node
 		uint x = 1 << (curfactor - 1); //the with which a comparison will happen
@@ -559,10 +555,10 @@ public:
 			x = (x >= l || search < *(cur + x) ? x - (1 << 0) : x + (1 << 0));
 		}
 		x = (x >= l || search < *(cur + x) ? x - 1 : x); //now search >= x and < x + 1
-		if (x >= l || search > *(cur + x)) { // if the value isn't found
+		if (x >= l || (x == 0 && cur == firstleaf) || search > *(cur + x)) { // if the value isn't found
 			return false;
 		}
-		return true;
+		return *(cur + x);
 	}
 	E* const sort() {
 		if (length == 0) {
@@ -570,7 +566,7 @@ public:
 		}
 		const uint levels = this->levels;
 		uint level = levels;
-		T<E>* path = (T<E>*)malloc(sizeof(T<E>) * levels);
+		T<E>* path = this->path;
 		E* cur = start;
 		for (;level;) {
 			(path + --level)->start = cur;
@@ -578,10 +574,14 @@ public:
 			cur = *((E**)cur - 1);
 		}
 		E* ans = (E*)malloc(sizeof(E) * length);
-		uint x = 0;
+		E* firstleaf = this->firstleaf;
+		uint l = *(uint*)(firstleaf + (1 << k));
+		memcpy(ans, firstleaf + 1, sizeof(E) * (l - 1));
+		path->x = 1;
+		uint x = l - 1;
 		for (;;) {
 			cur = *((E**)path->start - path->x - 1);
-			uint l = *(uint*)(cur + (1 << k));
+			l = *(uint*)(cur + (1 << k));
 			memcpy(ans + x, cur, sizeof(E) * l);
 			if ((x += l) == length) {
 				return ans;
@@ -600,4 +600,7 @@ public:
 		}
 	}
 };
+
+#undef uint
+
 #endif /* GTREE_H_ */
